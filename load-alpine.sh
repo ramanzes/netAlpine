@@ -98,7 +98,7 @@ IP_PARAM="ip=${IP}::${GATEWAY}:${NETMASK}::${PRIMARY_IFACE}:off"
 KERNEL_PARAMS="${IP_PARAM} nameserver=${DNS} ssh cryptroot=plain:${ROOT_HASH} apkovl=- modules=virtio_net,virtio_blk,ext4,squashfs,loop"
 
 # === 5. Проверка наличия образов ===
-WORKDIR="/root/alpine-netboot"
+WORKDIR="alpine-netboot"
 if [ ! -f "$WORKDIR/vmlinuz" ] || [ ! -f "$WORKDIR/initramfs" ]; then
     echo "❌ Образы не найдены в $WORKDIR"
     echo "   Скачайте их сначала:"
