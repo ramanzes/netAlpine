@@ -4,7 +4,7 @@ set -e
 echo "=== Скачивание Alpine v3.23.3 netboot образов ==="
 
 NETBOOT_URL="https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/netboot-3.23.3"
-WORKDIR="alpine-netboot"
+WORKDIR="/mnt/alpine-netboot"
 mkdir -p "$WORKDIR" && cd "$WORKDIR"
 
 # Очищаем старые файлы
