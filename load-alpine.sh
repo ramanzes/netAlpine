@@ -36,7 +36,7 @@ echo "⏳ Загрузка Alpine netboot через 5 секунд..."
 echo "   Нажмите Ctrl+C СЕЙЧАС, если не готовы!"
 sleep 5
 
-cd /root/alpine-netboot
+cd alpine-netboot
 ROOT_PASSWORD="alpine-test-2026"
 ROOT_HASH=$(openssl passwd -6 "$ROOT_PASSWORD" 2>/dev/null || echo '$6$Xkf7WOQwwQGnJ1pr$dfpvF/yYXDLlcXdPfjJuSGRHpd/bnWxEWqGEB1Nsz49DiUINR8IpW4LgRJ82cJ9EBD4En84wi1g8qbvvLlY390')
 
