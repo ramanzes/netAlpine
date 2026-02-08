@@ -9,14 +9,12 @@ echo ""
 # === 1. Автоопределение сетевых параметров ===
 echo "🔍 Сбор сетевых параметров..."
 
-# Основной интерфейс (через который идёт трафик к интернету)
-PRIMARY_IFACE=$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") {print $(i+1); exit}}')
+PRIMARY_IFACE=$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") {print $(i+1); exit}}' || echo "ens3")
 if [ -z "$PRIMARY_IFACE" ]; then
     echo "❌ Не удалось определить основной интерфейс"
     exit 1
 fi
 
-# IP-адрес и маска (обработка /32 и других)
 IP_INFO=$(ip -4 addr show dev "$PRIMARY_IFACE" | grep -oP 'inet \K[\d.]+/\d+' | head -1)
 if [ -z "$IP_INFO" ]; then
     echo "❌ Не удалось определить IP-адрес интерфейса $PRIMARY_IFACE"
@@ -26,53 +24,30 @@ fi
 IP=$(echo "$IP_INFO" | cut -d'/' -f1)
 CIDR=$(echo "$IP_INFO" | cut -d'/' -f2)
 
-# Преобразуем CIDR в netmask (255.255.255.255 для /32 и т.д.)
-case "$CIDR" in
-    32) NETMASK="255.255.255.255" ;;
-    31) NETMASK="255.255.255.254" ;;
-    30) NETMASK="255.255.255.252" ;;
-    29) NETMASK="255.255.255.248" ;;
-    28) NETMASK="255.255.255.240" ;;
-    27) NETMASK="255.255.255.224" ;;
-    26) NETMASK="255.255.255.192" ;;
-    25) NETMASK="255.255.255.128" ;;
-    24) NETMASK="255.255.255.0" ;;
-    23) NETMASK="255.255.254.0" ;;
-    22) NETMASK="255.255.252.0" ;;
-    21) NETMASK="255.255.248.0" ;;
-    20) NETMASK="255.255.240.0" ;;
-    19) NETMASK="255.255.224.0" ;;
-    18) NETMASK="255.255.192.0" ;;
-    17) NETMASK="255.255.128.0" ;;
-    16) NETMASK="255.255.0.0" ;;
-    *) 
-        echo "⚠️  Неизвестная маска /$CIDR — используем 255.255.255.255"
-        NETMASK="255.255.255.255"
-        ;;
-esac
+# CIDR → netmask
+NETMASK="255.255.255.255"
+if [ "$CIDR" -lt 32 ]; then
+    # Расчёт маски для не-/32 сетей (редко на VPS)
+    NETMASK=$(printf "%d.%d.%d.%d" \
+        $((256 - 2**(8 - CIDR/8 % 8))) \
+        $((256 - 2**(8 - (CIDR-8)/8 % 8))) \
+        $((256 - 2**(8 - (CIDR-16)/8 % 8))) \
+        $((256 - 2**(8 - (CIDR-24)/8 % 8))) 2>/dev/null || echo "255.255.255.0")
+fi
 
-# Шлюз по умолчанию
 GATEWAY=$(ip route | grep '^default' | awk '{print $3}' | head -1)
 if [ -z "$GATEWAY" ]; then
     echo "❌ Не удалось определить шлюз по умолчанию"
     exit 1
 fi
 
-# DNS (первый из /etc/resolv.conf)
-DNS=$(grep -v '^#' /etc/resolv.conf | grep nameserver | awk '{print $2}' | head -1)
-if [ -z "$DNS" ]; then
-    DNS="8.8.8.8"
-    echo "⚠️  DNS не найден — используем $DNS"
-fi
+DNS=$(grep -v '^#' /etc/resolv.conf | grep nameserver | awk '{print $2}' | head -1 || echo "8.8.8.8")
 
 # === 2. Генерация пароля ===
 ROOT_PASSWORD=$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 16)
-ROOT_HASH=$(openssl passwd -6 "$ROOT_PASSWORD" 2>/dev/null || {
-    # Фолбэк для систем без openssl (крайне редко)
-    echo '$6$rounds=5000$alpine$hashed'
-})
+ROOT_HASH=$(openssl passwd -6 "$ROOT_PASSWORD" 2>/dev/null || echo '$6$rounds=5000$alpine$hashed')
 
-# === 3. Вывод параметров для подтверждения ===
+# === 3. Вывод параметров ===
 echo ""
 echo "🌐 Обнаруженная конфигурация сети:"
 echo "   IP:       $IP/$CIDR"
@@ -81,43 +56,67 @@ echo "   Шлюз:     $GATEWAY"
 echo "   Интерфейс: $PRIMARY_IFACE"
 echo "   DNS:      $DNS"
 echo ""
-echo "🔐 Сгенерированный пароль root для Alpine:"
-echo "   $ROOT_PASSWORD"
-echo ""
-echo "⚠️  ВАЖНО: После kexec -e ОТКАТ НЕВОЗМОЖЕН!"
-echo "   Единственный способ восстановить доступ — ребут через панель хостера."
+echo "🔐 Пароль root для Alpine: $ROOT_PASSWORD"
 echo ""
 
-read -p "Подтвердите запуск (yes): " CONFIRM
-[ "$CONFIRM" != "yes" ] && echo "❌ Отмена" && exit 1
-
-# === 4. Формирование параметров ядра ===
-# Формат: ip=<client-ip>::<gateway>:<netmask>::<device>:off
-IP_PARAM="ip=${IP}::${GATEWAY}:${NETMASK}::${PRIMARY_IFACE}:off"
-
-KERNEL_PARAMS="${IP_PARAM} nameserver=${DNS} ssh cryptroot=plain:${ROOT_HASH} apkovl=- modules=virtio_net,virtio_blk,ext4,squashfs,loop"
-
-# === 5. Проверка наличия образов ===
+# === 4. Проверка образов ===
 WORKDIR="alpine-netboot"
 if [ ! -f "$WORKDIR/vmlinuz" ] || [ ! -f "$WORKDIR/initramfs" ]; then
     echo "❌ Образы не найдены в $WORKDIR"
-    echo "   Скачайте их сначала:"
+    echo "   Скачайте их:"
     echo "   mkdir -p $WORKDIR && cd $WORKDIR"
     echo "   wget https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/netboot-3.23.3/vmlinuz-virt -O vmlinuz"
     echo "   wget https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/netboot-3.23.3/initramfs-virt -O initramfs"
     exit 1
 fi
 
+echo "📦 Образы найдены:"
+ls -lh "$WORKDIR"/vmlinuz "$WORKDIR"/initramfs 2>/dev/null | awk '{print "   " $9 ": " $5}'
+
+# === 5. КРИТИЧЕСКИ ВАЖНО: Формат параметра для /32 + onlink ===
+# Для сетей /32 с шлюзом в другой подсети ИСПОЛЬЗУЕМ СПЕЦИАЛЬНЫЙ ФОРМАТ:
+#   ip=<IP>::<шлюз>::<интерфейс>:on
+# Обратите внимание: МАСКА ОПУЩЕНА (пустое поле после шлюза), и ":on" в конце
+
+if [ "$CIDR" = "32" ]; then
+    echo "💡 Сеть /32 обнаружена — используем специальный формат для onlink шлюза"
+    IP_PARAM="ip=${IP}::${GATEWAY}::${PRIMARY_IFACE}:on"
+else
+    IP_PARAM="ip=${IP}::${GATEWAY}:${NETMASK}::${PRIMARY_IFACE}:off"
+fi
+
+KERNEL_PARAMS="${IP_PARAM} nameserver=${DNS} ssh cryptroot=plain:${ROOT_HASH} apkovl=- modules=virtio_net,virtio_blk,ext4,squashfs,loop"
+
+echo ""
+echo "⚙️  Параметры ядра:"
+echo "   $KERNEL_PARAMS"
+echo ""
+
+read -p "Подтвердите запуск (yes): " CONFIRM
+[ "$CONFIRM" != "yes" ] && echo "❌ Отмена" && exit 1
+
 cd "$WORKDIR"
 
-# === 6. Тестовый прогон ===
+# === 6. ТЕСТОВЫЙ ПРОГОН С ОТЛАДКОЙ ===
 echo ""
-echo "🔍 Тестовый прогон (проверка параметров без загрузки)..."
-if ! kexec -l vmlinuz --initrd=initramfs --append="$KERNEL_PARAMS" 2>&1 | grep -q "entry at"; then
-    echo "❌ Ошибка при загрузке образа в память"
+echo "🔍 Тестовый прогон с отладкой..."
+echo "   Выполняется: kexec -l vmlinuz --initrd=initramfs --append=\"$KERNEL_PARAMS\""
+echo ""
+
+# Запускаем с выводом ошибок
+if ! kexec_output=$(kexec -l vmlinuz --initrd=initramfs --append="$KERNEL_PARAMS" 2>&1); then
+    echo "❌ kexec завершился с ошибкой:"
+    echo "$kexec_output"
+    echo ""
+    echo "🔍 Возможные причины:"
+    echo "   • Неправильный формат параметра ip= (особенно для /32)"
+    echo "   • Отсутствует модуль ядра (попробуйте добавить 'modules=...')"
+    echo "   • Повреждённые образы vmlinuz/initramfs"
     exit 1
 fi
-echo "✅ Параметры приняты ядром"
+
+echo "✅ Тестовый прогон успешен — параметры приняты ядром"
+echo "$kexec_output" | head -3
 
 # Очищаем тестовую загрузку
 kexec -u
@@ -138,6 +137,5 @@ echo "🔄 Выполняется kexec -e (точка невозврата)..."
 sleep 2
 kexec -e
 
-# Эта точка никогда не будет достигнута
-echo "❌ КРИТИЧЕСКАЯ ОШИБКА: система не заменилась"
+echo "❌ Невозможное состояние — система должна была замениться"
 exit 1
